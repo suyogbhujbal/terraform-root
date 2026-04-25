@@ -1,133 +1,64 @@
-// ============================================================
-//  Jenkinsfile — Terraform Pipeline with Environment Choice
-//  Select ENV → Init → Plan → Approve → Apply
-// ============================================================
-
 pipeline {
+agent any
 
-    agent any
+parameters {
+    choice(
+        name: 'ENV',
+        choices: ['dev', 'uat', 'prod'],
+        description: 'Select Environment'
+    )
+    choice(
+        name: 'ACTION',
+        choices: ['plan', 'apply', 'destroy'],
+        description: 'Select Terraform Action'
+    )
+    string(
+        name: 'BRANCH',
+        defaultValue: 'main',
+        description: 'Git branch'
+    )
+}
 
-    parameters {
-        choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'uat', 'prod'],
-            description: 'Select the environment to run Terraform against'
-        )
+stages {
+
+    stage('Checkout') {
+        steps {
+            checkout scmGit(
+                branches: [[name: "*/${params.BRANCH}"]],
+                userRemoteConfigs: [[url: 'https://github.com/suyogbhujbal/terraform-root.git']]
+            )
+        }
     }
 
-    environment {
-   //     AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
-   //     AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
-        AWS_DEFAULT_REGION    = 'us-east-1'
-        TF_VAR_FILE           = "envs/${params.ENVIRONMENT}.tfvars"
-        TF_PLAN_FILE          = "tfplan-${params.ENVIRONMENT}"
+    stage('Terraform Init') {
+        steps {
+            sh """
+            terraform init -reconfigure \
+            -backend-config="key=${params.ENV}/terraform.tfstate"
+            """
+        }
     }
 
-    stages {
+    stage('Terraform Action') {
+        steps {
+            script {
+                def tfvarsFile = "envs/${params.ENV}.tfvars"
 
-        // ── Checkout ──────────────────────────────────────────
-        stage('Checkout') {
-            steps {
-                checkout scm
-                echo "Running pipeline for environment: ${params.ENVIRONMENT}"
-            }
-        }
-
-        // ── Fix State Dir Permissions ─────────────────────────
-        // Ensures Jenkins can read/write the local Terraform state
-        // directory. This resolves "permission denied" errors on
-        // terraform.tfstate.d/<env>/terraform.tfstate.backup
-        stage('Fix Permissions') {
-            steps {
-                sh """
-                   sudo mkdir -p terraform.tfstate.d/${params.ENVIRONMENT}
-                   sudo chmod -R 777 terraform.tfstate.d/
-                    echo "✅ State directory permissions fixed"
-                """
-            }
-        }
-
-        // ── Terraform Init ────────────────────────────────────
-        stage('Terraform Init') {
-            steps {
-                sh """
-                    echo "==> Terraform Init [ ${params.ENVIRONMENT} ]"
-                    terraform init -reconfigure -input=false
-                    terraform workspace select ${params.ENVIRONMENT} || \
-                        terraform workspace new ${params.ENVIRONMENT}
-                    echo "Active workspace: \$(terraform workspace show)"
-                """
-            }
-        }
-
-        // ── Terraform Plan ────────────────────────────────────
-        stage('Terraform Plan') {
-            steps {
-                sh """
-                    echo "==> Terraform Plan [ ${params.ENVIRONMENT} ]"
-                    terraform plan \
-                        -var-file="${env.TF_VAR_FILE}" \
-                        -out="${env.TF_PLAN_FILE}" \
-                        -input=false
-                """
-            }
-            post {
-                always {
-                    sh """
-                        terraform show -no-color "${env.TF_PLAN_FILE}" \
-                            > "${env.TF_PLAN_FILE}.txt" 2>/dev/null || true
-                    """
-                    archiveArtifacts artifacts: "tfplan-${params.ENVIRONMENT}.txt",
-                                     allowEmptyArchive: true
+                if (params.ACTION == 'plan') {
+                    echo "Running PLAN for ${params.ENV}"
+                    sh "terraform plan -var-file=${tfvarsFile}"
+                } 
+                else if (params.ACTION == 'apply') {
+                    echo "Running APPLY for ${params.ENV}"
+                    sh "terraform apply -auto-approve -var-file=${tfvarsFile}"
+                } 
+                else if (params.ACTION == 'destroy') {
+                    echo "Running DESTROY for ${params.ENV}"
+                    sh "terraform destroy -auto-approve -var-file=${tfvarsFile}"
                 }
             }
         }
-
-        // ── Approval Gate ─────────────────────────────────────
-        stage('Approval') {
-            steps {
-                script {
-                    def msg = params.ENVIRONMENT == 'prod'
-                        ? "PRODUCTION deployment — are you sure?"
-                        : "Approve Apply for ${params.ENVIRONMENT.toUpperCase()}?"
-
-                    input message: msg, ok: "Yes, Apply ${params.ENVIRONMENT.toUpperCase()}"
-                }
-            }
-        }
-
-        // ── Terraform Apply ───────────────────────────────────
-        stage('Terraform Apply') {
-            steps {
-                sh """
-                    echo "==> Terraform Apply [ ${params.ENVIRONMENT} ]"
-                    terraform apply -input=false -auto-approve "${env.TF_PLAN_FILE}"
-                """
-            }
-        }
-
-        // ── Show Outputs ──────────────────────────────────────
-        stage('Terraform Output') {
-            steps {
-                sh """
-                    echo "==> Outputs for ${params.ENVIRONMENT}"
-                    terraform output || true
-                """
-            }
-        }
-
     }
-
-    post {
-        always {
-            sh "rm -f ${env.TF_PLAN_FILE} ${env.TF_PLAN_FILE}.txt || true"
-        }
-        success {
-            echo "✅ ${params.ENVIRONMENT.toUpperCase()} deployed successfully!"
-        }
-        failure {
-            echo "❌ Pipeline failed for ${params.ENVIRONMENT.toUpperCase()} — check logs."
-        }
-    }
+}
 
 }
